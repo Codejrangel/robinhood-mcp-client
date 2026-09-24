@@ -8,7 +8,7 @@ Flow (MCP spec / RFC 8707 + RFC 7591 + RFC 8414):
   4. User opens the authorization URL in a browser, logs into Robinhood,
      approves the agentic-trading scopes.
   5. Robinhood redirects to our loopback listener with an auth code.
-  6. We exchange the code for access + refresh tokens (tokens last ~4 days).
+  6. We exchange the code for access + refresh tokens (tokens last ~7 days observed).
 
 Security rules for this project:
   * OAuth tokens + the dynamically-registered client info persist in a
@@ -210,6 +210,26 @@ class FileTokenStorage(TokenStorage):
             return float("inf")
         return time.time() - obtained
 
+    def stored_token_expiry(self) -> float | None:
+        """Absolute expiry timestamp for the stored access token, if known.
+
+        The MCP SDK only attempts the refresh_token grant when its own
+        expiry clock says the token is expired — but it never sets that
+        clock for tokens loaded from disk, so refresh was silently dead
+        and the first 401 went straight to interactive auth (2026-09-24).
+        Seed the provider's clock from obtained_at + expires_in so refresh
+        fires as designed.
+        """
+        tokens = self._data.get("tokens") or {}
+        obtained_at = self._data.get("obtained_at")
+        expires_in = tokens.get("expires_in")
+        if not obtained_at or expires_in is None:
+            return None
+        try:
+            return float(obtained_at) + int(expires_in)
+        except (TypeError, ValueError):
+            return None
+
     def save_server_metadata(self, md: OAuthMetadata) -> None:
         self._data["server_metadata"] = md.model_dump(mode="json")
         self._write()
@@ -384,6 +404,16 @@ def build_provider(
         redirect_handler=flow.redirect,
         callback_handler=flow.callback,
     )
+    # Seed the SDK's token-expiry clock from the stored token's real age.
+    # Without this, is_token_valid() is True forever for disk-loaded tokens,
+    # the refresh grant never fires, and the first 401 demands interactive
+    # auth (root cause of the 2026-09-24 outage). After a successful refresh
+    # the SDK maintains the clock itself via update_token_expiry().
+    seed_expiry = getattr(storage, "stored_token_expiry", None)
+    if callable(seed_expiry):
+        expiry = seed_expiry()
+        if expiry is not None:
+            provider.context.token_expiry_time = expiry
     return provider, storage
 
 
