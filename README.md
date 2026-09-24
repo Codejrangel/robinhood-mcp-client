@@ -15,7 +15,7 @@ from moving real money.** Reads are free; writes must pass five gates.
 | 1 | Account gate | Writes are refused unless the order targets the single designated account (`RH_ACCOUNT_NUMBER`). Your main portfolio can never be touched by accident. |
 | 2 | Defined-risk | Long options always pass (max loss = premium). Any sell-to-open leg must sit inside a same-expiry, same-underlying spread with every short leg covered further OTM. Naked shorts, calendars, and diagonals are refused. Equity sells are checked against owned shares — shorting is impossible. |
 | 3 | Review-before-place | `place` only executes a stage created by `stage`, which embeds the broker's own `review_*` preview of the exact order. No preview, no placement. |
-| 4 | Stage TTL | Stages expire after 24h. A stale preview can't be executed — re-stage for a fresh one. |
+| 4 | Stage TTL | Stages die at the next 4:00 PM ET closing bell (capped at 24h). A stale preview can't be executed — re-stage for a fresh one. |
 | 5 | Visible log | Every placement appends timestamp, full args, risk check, broker preview, and result to `trade-log.md`. |
 
 On top of the code gates: `place` requires `--yes` **and** the operator's
