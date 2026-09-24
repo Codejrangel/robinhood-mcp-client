@@ -29,7 +29,7 @@ import json
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from rh_auth import TOKEN_DIR
@@ -54,8 +54,26 @@ REVIEW_TOOL = {
     "place_equity_order": "review_equity_order",
     "place_option_order": "review_option_order",
 }
-# Stages older than this are refused at place time (re-stage for fresh review).
+# Stage lifetime: a stage dies at the next 4:00 PM ET closing bell, and never
+# lives longer than STAGE_TTL_SECONDS. A stage that survived overnight would
+# carry a stale broker preview (overnight news moves everything), so placing
+# it the next day is refused — re-stage for a fresh preview.
 STAGE_TTL_SECONDS = 24 * 3600
+MARKET_CLOSE_ET = (16, 0)  # 4:00 PM Eastern
+
+
+def _stage_expires_at(created: datetime) -> datetime:
+    """Next 4:00 PM ET after `created`, capped at 24h out. Returns UTC."""
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    created_et = created.astimezone(et)
+    close = created_et.replace(
+        hour=MARKET_CLOSE_ET[0], minute=MARKET_CLOSE_ET[1], second=0, microsecond=0
+    )
+    if close <= created_et:
+        close += timedelta(days=1)
+    return min(close, created + timedelta(seconds=STAGE_TTL_SECONDS))
 
 
 class TradeRefused(Exception):
@@ -335,6 +353,9 @@ async def stage_order(tool: str, args: dict) -> dict:
     stage = {
         "stage_id": stage_id,
         "created_at": _now_iso(),
+        "expires_at": _stage_expires_at(datetime.now(timezone.utc)).isoformat(
+            timespec="seconds"
+        ),
         "created_by": "operator",
         "status": "staged",
         "tool": tool,
@@ -369,6 +390,12 @@ async def place_staged(stage_id: str) -> dict:
     stage = load_stage(stage_id)
     # Re-run the gates fresh against the staged args (fail closed on drift).
     validation = await validate_order(stage["tool"], stage["args"])
+    expires_at = stage.get("expires_at")
+    if expires_at and datetime.now(timezone.utc) > datetime.fromisoformat(expires_at):
+        raise TradeRefused(
+            f"REFUSED: stage {stage_id} expired at the closing bell ({expires_at}) — "
+            "re-stage for a fresh broker preview."
+        )
     result = await call_tool_raw(stage["tool"], validation["args"], interactive=False)
     outcome = {
         "placed_at": _now_iso(),
@@ -432,6 +459,9 @@ def stage_summary(stage: dict) -> str:
     if review.get("output"):
         lines.append("broker preview (truncated):")
         lines.append("  " + review["output"][0][:500].replace("\n", " "))
+    lines.append(
+        f"expires: {stage.get('expires_at', 'unknown')} (closing-bell expiry)"
+    )
     lines.append(
         "STATUS: staged only — nothing placed. `place` needs the operator's explicit approval."
     )
