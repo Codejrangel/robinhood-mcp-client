@@ -417,6 +417,50 @@ def build_provider(
     return provider, storage
 
 
+async def ensure_refresh_metadata(provider, storage) -> None:
+    """Seed OAuth server metadata so the SDK's silent refresh hits the real token endpoint.
+
+    Root cause (2026-09-29): in a fresh process provider.context.oauth_metadata is None,
+    so OAuthClientProvider._refresh_token() guesses the token URL as
+    https://agent.robinhood.com/token -> 404 -> refresh "fails" -> the flow falls through
+    to interactive auth on every access-token expiry (~5 days), even though the
+    refresh_token grant itself is healthy. The real endpoint
+    (https://api.robinhood.com/oauth2/token/) is only learned via discovery, which
+    previously ran solely inside the interactive login flow.
+
+    This seeds context.oauth_metadata from disk (persisted after first discovery);
+    only when the stored token is actually expired (a refresh is imminent) and no
+    persisted metadata exists does it pay for one unauthenticated discovery round.
+    Discovery failure degrades gracefully to the old behavior — it never breaks
+    session creation. The interactive flow overwrites oauth_metadata with fresh
+    discovery anyway, so seeding is harmless there.
+    """
+    if provider.context.oauth_metadata is not None:
+        return
+    md = None
+    load = getattr(storage, "load_server_metadata", None)
+    if callable(load):
+        try:
+            md = load()
+        except Exception:
+            md = None
+    if md is None:
+        await provider._initialize()
+        if provider.context.is_token_valid() or not provider.context.can_refresh_token():
+            return
+        try:
+            md, _, _ = await discover_metadata()
+        except Exception:
+            return
+        save = getattr(storage, "save_server_metadata", None)
+        if callable(save):
+            try:
+                save(md)
+            except Exception:
+                pass
+    provider.context.oauth_metadata = md
+
+
 # --------------------------------------------------------------------------- #
 # Unauthenticated discovery: what the 401/WWW-Authenticate dance would find.
 # --------------------------------------------------------------------------- #

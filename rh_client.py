@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from rh_auth import MCP_URL, build_provider, make_http_client
+from rh_auth import MCP_URL, build_provider, ensure_refresh_metadata, make_http_client
 
 # --------------------------------------------------------------------------- #
 # Tool policy (phase 1: read-only)
@@ -87,6 +87,10 @@ async def mcp_session(port: int = 8765, *, interactive: bool = True, auth_flow=N
     instructions instead.
     """
     provider, storage = build_provider(port, interactive=interactive, flow=auth_flow)
+    # Seed OAuth server metadata so a silent refresh_token grant posts to the real
+    # token endpoint instead of a guessed URL (2026-09-29 root cause). No-op when
+    # the stored token is still valid.
+    await ensure_refresh_metadata(provider, storage)
     http_client = make_http_client(auth=provider, timeout=60)
     async with http_client:
         async with streamable_http_client(MCP_URL, http_client=http_client) as (
